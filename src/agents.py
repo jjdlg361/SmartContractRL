@@ -6,7 +6,8 @@ import pandas as pd
 import random
 import torch
 import optuna
-from stable_baselines3 import DQN, PPO
+from stable_baselines3 import DQN
+from grpo import GRPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import BaseCallback
@@ -57,18 +58,11 @@ def optimize_dqn(trial):
     mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=10)
     return mean_reward
 
-# Function to optimize PPO
-def optimize_ppo(trial):
-    n_steps = trial.suggest_categorical('n_steps', [64, 128, 256, 512])
-    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
-    n_epochs = trial.suggest_int('n_epochs', 1, 10)
-    gamma = trial.suggest_uniform('gamma', 0.9, 0.9999)
+# Function to optimize GRPO
+def optimize_gpro(trial):
     learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
-    ent_coef = trial.suggest_loguniform('ent_coef', 1e-8, 1e-2)
-    clip_range = trial.suggest_uniform('clip_range', 0.1, 0.4)
 
-    model = PPO('MlpPolicy', train_env, n_steps=n_steps, batch_size=batch_size, n_epochs=n_epochs,
-                gamma=gamma, learning_rate=learning_rate, ent_coef=ent_coef, clip_range=clip_range, verbose=0, seed=42)
+    model = GRPO(train_env, reward_model=lambda o, a: 1, group_size=4, lr=learning_rate)
     model.learn(total_timesteps=10000)
 
     mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=10)
@@ -78,29 +72,29 @@ def optimize_ppo(trial):
 study_dqn = optuna.create_study(direction='maximize')
 study_dqn.optimize(optimize_dqn, n_trials=20)
 
-# Optuna study for PPO
-study_ppo = optuna.create_study(direction='maximize')
-study_ppo.optimize(optimize_ppo, n_trials=20)
+# Optuna study for GRPO
+study_gpro = optuna.create_study(direction='maximize')
+study_gpro.optimize(optimize_gpro, n_trials=20)
 
 # Best hyperparameters
 best_params_dqn = study_dqn.best_params
-best_params_ppo = study_ppo.best_params
+best_params_gpro = study_gpro.best_params
 
 print("Best DQN params:", best_params_dqn)
-print("Best PPO params:", best_params_ppo)
+print("Best GRPO params:", best_params_gpro)
 
 # Initialize callbacks to store rewards
 dqn_callback = RewardCallback()
-ppo_callback = RewardCallback()
+gpro_callback = RewardCallback()
 
 # Train the models with best parameters and reward callback
 best_dqn_model = DQN('MlpPolicy', train_env, **best_params_dqn, verbose=1, seed=42)  # verbose=1 
 best_dqn_model.learn(total_timesteps=15000, callback=dqn_callback)
 
-best_ppo_model = PPO('MlpPolicy', train_env, **best_params_ppo, verbose=1, seed=42)  # **best_params_ppo
-best_ppo_model.learn(total_timesteps=10000, callback=ppo_callback)
+best_gpro_model = GRPO(train_env, reward_model=lambda o, a: 1, group_size=4, lr=best_params_gpro['learning_rate'])
+best_gpro_model.learn(total_timesteps=10000, callback=gpro_callback)
 
-# Plot learning curves for DQN and PPO
+# Plot learning curves for DQN and GRPO
 plt.figure(figsize=(15, 12))
 plt.subplot(2,1,1)
 plt.plot(dqn_callback.cumulative_rewards, label='DQN')
@@ -109,21 +103,21 @@ plt.ylabel('Cumulative Reward')
 plt.title('Learning Curve for DQN')
 
 plt.subplot(2,1,2)
-plt.plot(ppo_callback.cumulative_rewards, label='PPO')
+plt.plot(gpro_callback.cumulative_rewards, label='GRPO')
 plt.xlabel('Episode')
 plt.ylabel('Cumulative Reward')
-plt.title('Learning Curve for PPO')
+plt.title('Learning Curve for GRPO')
 plt.savefig("../plots/agents_plot1.png")
 plt.close()
 
-# Evaluate the best DQN and PPO models on the validation set
+# Evaluate the best DQN and GRPO models on the validation set
 accuracy_dqn, recall_dqn, f1_dqn, pred_dqn, label_dqn = evaluate_model(best_dqn_model, val_env)
-accuracy_ppo, recall_ppo, f1_ppo, pred_ppo, label_ppo = evaluate_model(best_ppo_model, val_env)
+accuracy_gpro, recall_gpro, f1_gpro, pred_gpro, label_gpro = evaluate_model(best_gpro_model, val_env)
 
 print(f"DQN - Accuracy: {accuracy_dqn}, Recall: {recall_dqn}, F1: {f1_dqn}")
-print(f"PPO - Accuracy: {accuracy_ppo}, Recall: {recall_ppo}, F1: {f1_ppo}")
+print(f"GRPO - Accuracy: {accuracy_gpro}, Recall: {recall_gpro}, F1: {f1_gpro}")
 
-print(pred_dqn), print(label_dqn), print(pred_ppo), print(label_ppo)
+print(pred_dqn), print(label_dqn), print(pred_gpro), print(label_gpro)
 
 # DQN
 num_classes = 6
@@ -191,7 +185,7 @@ plt.ylabel('Precision')
 plt.legend(loc='best')
 plt.savefig('DQN Multiclass PR Curve',dpi=300)
 
-# PPO
+# GRPO
 num_classes = 6
 
 fpr_dict = dict()
@@ -205,8 +199,8 @@ pr_threshold_dict = dict()
 pr_auc_dict = dict()
 
 # Binarize multi-label classes using One vs ALL methodology
-y_binarize = label_binarize(pred_ppo, classes=[0,1,2,3,4,5])
-y_pred_multiclass = label_binarize(label_ppo, classes=[0,1,2,3,4,5])
+y_binarize = label_binarize(pred_gpro, classes=[0,1,2,3,4,5])
+y_pred_multiclass = label_binarize(label_gpro, classes=[0,1,2,3,4,5])
 
 for label_num in range(num_classes):
     y_true_for_curr_class = y_binarize[:, label_num]
@@ -241,9 +235,9 @@ plt.title('Receiver Operating Characteristic (ROC) Curve')
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive rate')
 plt.legend(loc='best')
-plt.savefig('PPO Multiclass ROC',dpi=300)
+plt.savefig('GRPO Multiclass ROC',dpi=300)
 
-# plot PR for PPO
+# plot PR for GRPO
 plt.plot(recall_dict[0], precision_dict[0], linestyle='-.',color='orange', label=f'access-control (area = {pr_auc_dict[0]:.2f})')
 plt.plot(recall_dict[1], precision_dict[1], linestyle='-.',color='green', label=f'arithmetic (area = {pr_auc_dict[1]:.2f})')
 plt.plot(recall_dict[2], precision_dict[2], linestyle='-.',color='blue', label=f'other (area = {pr_auc_dict[2]:.2f})')
@@ -255,10 +249,10 @@ plt.title('Precision-Recall Curve')
 plt.xlabel('Recall')
 plt.ylabel('Precision')
 plt.legend(loc='best')
-plt.savefig('PPO Multiclass PR Curve',dpi=300)
+plt.savefig('GRPO Multiclass PR Curve',dpi=300)
 
-# Compare DQN and PPO to select the optimal model - PPO in this case
-optimal_model = best_dqn_model if f1_dqn > f1_ppo else best_ppo_model
+# Compare DQN and GRPO to select the optimal model - GRPO in this case
+optimal_model = best_dqn_model if f1_dqn > f1_gpro else best_gpro_model
 optimal_model
 
 # Evaluate the optimal model on the test set
